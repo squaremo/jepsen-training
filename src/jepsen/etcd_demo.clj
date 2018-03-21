@@ -4,11 +4,17 @@
    [clojure.string :as str]
    [jepsen
     [control :as c]
+    [client :as client]
+    [generator :as gen]
     [cli :as cli]
     [db :as db]
     [tests :as tests]]
+   [verschlimmbesserung.core :as v]
+   [slingshot.slingshot :refer [try+]]
    [jepsen.control.util :as cu]
    [jepsen.os.debian :as debian]))
+
+;; === ETCD DB ===
 
 (def dir "/opt/etcd")
 (def binary "etcd")
@@ -69,12 +75,57 @@
     (log-files [db test node]
       [logfile])))
 
+;; === ETCD CLIENT ===
+
+;; Client operations
+(defn r   [_ _] {:type :invoke, :f :read, :value nil})
+(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
+(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
+
+(defn parse-long
+  "Parse a maybe string into a maybe long"
+  [v]
+  (when v
+    (Long/parseLong v)))
+
+(defrecord Client [conn]
+  client/Client
+  (open! [this test node]
+    (assoc this :conn (v/connect (client-url node) {:timeout 5000})))
+
+  (setup! [this test])
+
+  (invoke! [this test op] ;; -> op
+    (case (:f op)
+      :cas (let [[v v'] (:value op)] ;; input val is [before after]
+             (try+
+              (if (v/cas! conn "foo" v v' {:prev-exist? true})
+                (assoc op :type :ok)
+                (assoc op :type :fail))
+              (catch [:errorCode 100] _
+                (assoc op :type :fail :error :not-found))))
+      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo")))
+      :write (do (v/reset! conn "foo" (:value op))
+                 (assoc op :type :ok))))
+
+  (teardown! [this test])
+
+  (close! [_ test])) ;; etcd client does not need closing
+
+;; === test setup ===
+
 (defn etcd-test
   "Parses command-line options and returns a test value"
   [opts]
   (merge tests/noop-test ;; map merge
          opts
-         {:os debian/os
+         {:name "etcd"
+          :os debian/os
+          :client (Client. nil)
+          :generator (->> (gen/mix [r w cas])
+                          (gen/stagger 1) ;; do about an op a second
+                          (gen/nemesis nil) ;; don't give any ops to the nemesis
+                          (gen/time-limit 10)) ;; run for 10 seconds
           :db (db "v3.1.5")}))
 
 (defn -main
