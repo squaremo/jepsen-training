@@ -3,6 +3,7 @@
    [clojure.tools.logging :refer :all]
    [clojure.string :as str]
    [jepsen
+    [checker :as checker]
     [control :as c]
     [client :as client]
     [generator :as gen]
@@ -11,6 +12,7 @@
     [tests :as tests]]
    [verschlimmbesserung.core :as v]
    [slingshot.slingshot :refer [try+]]
+   [knossos.model :as model]
    [jepsen.control.util :as cu]
    [jepsen.os.debian :as debian]))
 
@@ -104,7 +106,7 @@
                 (assoc op :type :fail))
               (catch [:errorCode 100] _
                 (assoc op :type :fail :error :not-found))))
-      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo")))
+      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo"))) ;; change to 5 to make it bork
       :write (do (v/reset! conn "foo" (:value op))
                  (assoc op :type :ok))))
 
@@ -122,6 +124,10 @@
          {:name "etcd"
           :os debian/os
           :client (Client. nil)
+          :model (model/cas-register)
+          :checker (checker/compose
+                    {:linear (checker/linearizable)
+                     :perf (checker/perf)})
           :generator (->> (gen/mix [r w cas])
                           (gen/stagger 1) ;; do about an op a second
                           (gen/nemesis nil) ;; don't give any ops to the nemesis
