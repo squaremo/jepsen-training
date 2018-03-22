@@ -7,6 +7,7 @@
     [control :as c]
     [client :as client]
     [generator :as gen]
+    [independent :as independent]
     [cli :as cli]
     [db :as db]
     [nemesis :as nemesis]
@@ -91,7 +92,7 @@
   (when v
     (Long/parseLong v)))
 
-(defrecord Client [conn opts]
+(defrecord Client [conn]
   client/Client
   (open! [this test node]
     (assoc this :conn (v/connect (client-url node) {:timeout 5000})))
@@ -99,56 +100,71 @@
   (setup! [this test])
 
   (invoke! [this test op] ;; -> op
-    (try+
-     (case (:f op)
-       :cas (let [[v v'] (:value op)] ;; input val is [before after]
-              (if (v/cas! conn "foo" v v' {:prev-exist? true})
-                (assoc op :type :ok)
-                (assoc op :type :fail)))
-       :read (assoc op :type :ok :value (parse-long (v/get conn "foo" {:quorum? (:quorum opts)}))) ;; change to 5 to make it bork
-       :write (do (v/reset! conn "foo" (:value op)) (assoc op :type :ok)))
+    (let [[key val] (:value op)]
+      (try+
+       (case (:f op)
+         :cas (let [[v v'] val] ;; input val is [before after]
+                (if (v/cas! conn key v v' {:prev-exist? true})
+                  (assoc op :type :ok)
+                  (assoc op :type :fail)))
+         :read (let [result (parse-long (v/get conn key {:quorum? (:quorum test)}))]
+                 (assoc op :type :ok :value (independent/tuple key result)))
+       :write (do (v/reset! conn key val) (assoc op :type :ok)))
     (catch [:errorCode 100] _
       (assoc op :type :fail, :error :not-found))
     (catch java.net.SocketTimeoutException _
-      (assoc op :type (if (= (:f op) :read) :fail :info) :error :timeout))))
+      (assoc op :type (if (= (:f op) :read) :fail :info) :error :timeout)))))
 
   (teardown! [this test])
 
   (close! [_ test])) ;; etcd client does not need closing
 
-;; === test setup ===
+;; === test runner ===
+
+(def cli-opts [["-q" "--quorum BOOL" "Use quorum reads (or not)"]
+               ["-r" "--rate Hz" "Rate at which to attempt operations"]])
 
 (defn etcd-test
   "Parses command-line options and returns a test value"
   [opts]
-  (merge tests/noop-test ;; map merge
-         opts
-         {:name "etcd"
-          :os debian/os
-          :client (Client. nil opts)
-          :nemesis (nemesis/partition-random-halves) ;; partition when :f :start, end when :f :stop
-          :model (model/cas-register)
-          :checker (checker/compose
-                    {:linear (checker/linearizable)
-                     :timeline (timeline/html)
-                     :perf (checker/perf)})
-          :generator (->> (gen/mix [r w cas])
-                          (gen/stagger 1/10) ;; do about 10 ops a second
-                          (gen/nemesis
-                           (gen/seq (cycle ;; repeat forever
-                                     [(gen/sleep 5)
-                                      {:type :info, :f :start}
-                                      (gen/sleep 5)
-                                      {:type :info, :f :stop}])))
-                          (gen/time-limit (:time-limit opts)))
-          :db (db "v3.1.5")}))
+  (let [quorum (boolean (:quorum opts))
+        rate (or (:rate opts) 10)]
+    (merge tests/noop-test ;; map merge
+           opts
+           ;; CLI args
+           {:quorum quorum :rate rate}
+           ;; Test itself
+           {:name (str "etcd quorum=" quorum)
+            :os debian/os
+            :client (Client. nil)
+            :nemesis (nemesis/partition-random-halves) ;; partition when :f :start, end when :f :stop
+            :model (model/cas-register)
+            :checker (checker/compose
+                      {:per-key (independent/checker
+                                 (checker/compose
+                                  {:linear (checker/linearizable)
+                                   :timeline (timeline/html)}))
+                       :perf (checker/perf)})
+            :generator (->> (independent/concurrent-generator
+                             10 (map #(str "key" %) (range))
+                             (fn [_k] ;; not used; the machinery lifts the values given to [k v]
+                               (->> (gen/mix [r w cas])
+                                    (gen/stagger (/ rate)) ;; do about 10 ops a second
+                                    (gen/limit 100))))
+                            (gen/nemesis
+                             (gen/seq (cycle ;; repeat forever
+                                       [(gen/sleep 5)
+                                        {:type :info, :f :start}
+                                        (gen/sleep 5)
+                                        {:type :info, :f :stop}])))
+                            (gen/time-limit (:time-limit opts)))
+            :db (db "v3.1.5")})))
 
 (defn -main
   "Run jepsen test with command-line args"
   [& args]
   (cli/run!
    (merge
-    (cli/single-test-cmd {:test-fn etcd-test, :opt-spec [[nil "--quorum BOOL" "Use quorum reads (or not)"
-                                                          :default "false"]]})
+    (cli/single-test-cmd {:test-fn etcd-test, :opt-spec cli-opts})
     (cli/serve-cmd))
    args))
