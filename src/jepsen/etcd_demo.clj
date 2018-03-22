@@ -99,17 +99,18 @@
   (setup! [this test])
 
   (invoke! [this test op] ;; -> op
-    (case (:f op)
-      :cas (let [[v v'] (:value op)] ;; input val is [before after]
-             (try+
+    (try+
+     (case (:f op)
+       :cas (let [[v v'] (:value op)] ;; input val is [before after]
               (if (v/cas! conn "foo" v v' {:prev-exist? true})
                 (assoc op :type :ok)
-                (assoc op :type :fail))
-              (catch [:errorCode 100] _
-                (assoc op :type :fail :error :not-found))))
-      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo" {:quorum? (:quorum opts)}))) ;; change to 5 to make it bork
-      :write (do (v/reset! conn "foo" (:value op))
-                 (assoc op :type :ok))))
+                (assoc op :type :fail)))
+       :read (assoc op :type :ok :value (parse-long (v/get conn "foo" {:quorum? (:quorum opts)}))) ;; change to 5 to make it bork
+       :write (do (v/reset! conn "foo" (:value op)) (assoc op :type :ok)))
+    (catch [:errorCode 100] _
+      (assoc op :type :fail, :error :not-found))
+    (catch java.net.SocketTimeoutException _
+      (assoc op :type (if (= (:f op) :read) :fail :info) :error :timeout))))
 
   (teardown! [this test])
 
