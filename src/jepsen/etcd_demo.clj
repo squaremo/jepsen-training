@@ -91,7 +91,7 @@
   (when v
     (Long/parseLong v)))
 
-(defrecord Client [conn]
+(defrecord Client [conn opts]
   client/Client
   (open! [this test node]
     (assoc this :conn (v/connect (client-url node) {:timeout 5000})))
@@ -107,7 +107,7 @@
                 (assoc op :type :fail))
               (catch [:errorCode 100] _
                 (assoc op :type :fail :error :not-found))))
-      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo"))) ;; change to 5 to make it bork
+      :read  (assoc op :type :ok, :value (parse-long (v/get conn "foo" {:quorum? (:quorum opts)}))) ;; change to 5 to make it bork
       :write (do (v/reset! conn "foo" (:value op))
                  (assoc op :type :ok))))
 
@@ -124,7 +124,7 @@
          opts
          {:name "etcd"
           :os debian/os
-          :client (Client. nil)
+          :client (Client. nil opts)
           :nemesis (nemesis/partition-random-halves) ;; partition when :f :start, end when :f :stop
           :model (model/cas-register)
           :checker (checker/compose
@@ -147,6 +147,7 @@
   [& args]
   (cli/run!
    (merge
-    (cli/single-test-cmd {:test-fn etcd-test})
+    (cli/single-test-cmd {:test-fn etcd-test, :opt-spec [[nil "--quorum BOOL" "Use quorum reads (or not)"
+                                                          :default "false"]]})
     (cli/serve-cmd))
    args))
