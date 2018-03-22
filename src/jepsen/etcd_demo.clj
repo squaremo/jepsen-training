@@ -125,7 +125,7 @@
          {:name "etcd"
           :os debian/os
           :client (Client. nil)
-          :nemesis (nemesis/partition-random-halves) ;; partition when :start, end when :stop
+          :nemesis (nemesis/partition-random-halves) ;; partition when :f :start, end when :f :stop
           :model (model/cas-register)
           :checker (checker/compose
                     {:linear (checker/linearizable)
@@ -139,7 +139,7 @@
                                       {:type :info, :f :start}
                                       (gen/sleep 5)
                                       {:type :info, :f :stop}])))
-                          (gen/time-limit (or (:time-limit opts) 30)))
+                          (gen/time-limit (:time-limit opts)))
           :db (db "v3.1.5")}))
 
 (defn -main
