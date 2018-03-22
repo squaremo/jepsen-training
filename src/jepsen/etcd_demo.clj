@@ -9,7 +9,9 @@
     [generator :as gen]
     [cli :as cli]
     [db :as db]
+    [nemesis :as nemesis]
     [tests :as tests]]
+   [jepsen.checker.timeline :as timeline]
    [verschlimmbesserung.core :as v]
    [slingshot.slingshot :refer [try+]]
    [knossos.model :as model]
@@ -84,8 +86,7 @@
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
 (defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
-(defn parse-long
-  "Parse a maybe string into a maybe long"
+(defn parse-long "Parse a maybe string into a maybe long"
   [v]
   (when v
     (Long/parseLong v)))
@@ -124,14 +125,21 @@
          {:name "etcd"
           :os debian/os
           :client (Client. nil)
+          :nemesis (nemesis/partition-random-halves) ;; partition when :start, end when :stop
           :model (model/cas-register)
           :checker (checker/compose
                     {:linear (checker/linearizable)
+                     :timeline (timeline/html)
                      :perf (checker/perf)})
           :generator (->> (gen/mix [r w cas])
-                          (gen/stagger 1) ;; do about an op a second
-                          (gen/nemesis nil) ;; don't give any ops to the nemesis
-                          (gen/time-limit 10)) ;; run for 10 seconds
+                          (gen/stagger 1/10) ;; do about 10 ops a second
+                          (gen/nemesis
+                           (gen/seq (cycle ;; repeat forever
+                                     [(gen/sleep 5)
+                                      {:type :info, :f :start}
+                                      (gen/sleep 5)
+                                      {:type :info, :f :stop}])))
+                          (gen/time-limit (or (:time-limit opts) 30)))
           :db (db "v3.1.5")}))
 
 (defn -main
